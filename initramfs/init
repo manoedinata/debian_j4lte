@@ -1,0 +1,56 @@
+#!/bin/busybox sh
+
+export PATH=/bin
+
+rescue_shell() {
+	echo "$1" >/dev/console
+	echo "Dropping to rescue shell." >/dev/console
+	exec /bin/busybox sh
+}
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev || rescue_shell "Failed to mount devtmpfs."
+
+root=
+rootfstype=ext4
+rootflags=rw
+init=/sbin/init
+
+for arg in $(cat /proc/cmdline); do
+	case "$arg" in
+		root=*)       root="${arg#root=}" ;;
+		rootfstype=*) rootfstype="${arg#rootfstype=}" ;;
+		rootflags=*)  rootflags="${arg#rootflags=}" ;;
+		init=*)       init="${arg#init=}" ;;
+	esac
+done
+
+[ -z "$root" ] && rescue_shell "No root= given on kernel cmdline."
+
+# root= can name a device node directly, or a by-id/by-partlabel/by-uuid/by-label alias.
+case "$root" in
+	PARTLABEL=*) root="/dev/disk/by-partlabel/${root#PARTLABEL=}" ;;
+	PARTUUID=*)  root="/dev/disk/by-partuuid/${root#PARTUUID=}" ;;
+	UUID=*)      root="/dev/disk/by-uuid/${root#UUID=}" ;;
+	LABEL=*)     root="/dev/disk/by-label/${root#LABEL=}" ;;
+esac
+
+# eMMC partitions can take a moment to enumerate after devtmpfs mounts.
+i=0
+while [ ! -e "$root" ] && [ "$i" -lt 15 ]; do
+	sleep 1
+	i=$((i + 1))
+done
+
+[ -e "$root" ] || rescue_shell "Timed out waiting for root device: $root"
+
+mkdir -p /mnt/root
+mount -t "$rootfstype" -o "$rootflags" "$root" /mnt/root \
+	|| rescue_shell "Failed to mount $root as $rootfstype on /mnt/root."
+
+for d in proc sys dev run; do
+	[ -d "/mnt/root/$d" ] || mkdir -p "/mnt/root/$d"
+done
+
+exec switch_root /mnt/root "$init"
