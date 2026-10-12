@@ -1,0 +1,37 @@
+---
+.only-default: &only-default
+  only:
+    - master
+    - merge_requests
+    - tags
+
+build::musl::amd64:
+  <<: *only-default
+  image: alpine:edge
+  before_script:
+    - apk -q add
+        build-base
+        meson
+  script:
+    - meson --werror _build
+    - meson compile -C _build
+    - meson test -C _build --print-errorlogs
+
+  artifacts:
+    paths:
+      - _build/
+
+build::glibc::amd64:
+  <<: *only-default
+  image: archlinux:base-devel
+  before_script:
+    - pacman -Syu --noconfirm
+        meson
+  script:
+    - meson --werror _build
+    - meson compile -C _build
+    - meson test -C _build --print-errorlogs
+
+  artifacts:
+    paths:
+      - _build/

@@ -1,14 +1,15 @@
 #!/bin/bash
 #
-# Cross-compiles unudhcpd (static DHCP server for a single USB-tethered
-# client, from postmarketOS) using the same gcc-6-aarch64-linux-gnu
-# toolchain container as build_kernel.sh, and installs it into
-# debootstrap-rootfs as a systemd service bound to the rndis0 USB
-# gadget netdev.
+# Cross-compiles unudhcpd (vendored, patched copy in ./unudhcpd/ - see
+# its README) using the same gcc-6-aarch64-linux-gnu toolchain container
+# as build_kernel.sh, and installs it into debootstrap-rootfs as a
+# systemd service bound to the rndis0 USB gadget netdev.
 #
-# The initramfs only ever brings up the android_usb gadget itself (see
-# initramfs/init) - unudhcpd runs on the real root, started by systemd
-# once rndis0 exists, not from the initramfs.
+# Built as a normal dynamically linked binary: it only ever runs on the
+# full Debian rootfs now, never from the initramfs (which just brings up
+# the android_usb gadget itself - see initramfs/init), so there's no
+# need for -static, and NSS-backed libc calls (getprotobyname() used to
+# be one, see server.c) are actively unsafe when statically linked.
 #
 set -euo pipefail
 
@@ -18,7 +19,7 @@ CONTAINER_NAME="j4-gcc6"
 ROOTFS_DIR="$SCRIPT_DIR/debootstrap-rootfs"
 
 if [ ! -f "$SRC_DIR/main.c" ]; then
-	echo "error: $SRC_DIR looks empty (run 'git submodule update --init unudhcpd')" >&2
+	echo "error: $SRC_DIR looks empty" >&2
 	exit 1
 fi
 if [ ! -d "$ROOTFS_DIR" ]; then
@@ -35,13 +36,13 @@ if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
 	docker start "$CONTAINER_NAME" >/dev/null
 fi
 
-VERSION="$(cd "$SRC_DIR" && git describe --tags --always 2>/dev/null || echo 0.1)"
+VERSION="0.1-j4"
 
-echo "==> building unudhcpd $VERSION (static aarch64)"
+echo "==> building unudhcpd $VERSION (dynamic aarch64)"
 docker exec "$CONTAINER_NAME" rm -rf /tmp/unudhcpd-build
 docker cp "$SRC_DIR" "$CONTAINER_NAME:/tmp/unudhcpd-build"
 docker exec -w /tmp/unudhcpd-build "$CONTAINER_NAME" aarch64-linux-gnu-gcc-6 \
-	-O2 -Wall -static -DVERSION="\"$VERSION\"" \
+	-O2 -Wall -DVERSION="\"$VERSION\"" \
 	-o unudhcpd main.c server.c
 
 mkdir -p "$SCRIPT_DIR/misc-files"
