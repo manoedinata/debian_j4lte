@@ -1,3 +1,9 @@
 [submodule "kernel"]
 	path = kernel
 	url = https://github.com/DaunScape/android_kernel_samsung_universal7570
+[submodule "samsungipcd"]
+	path = samsungipcd
+	url = https://gitlab.com/sleirsgoevy/samsungipcd.git
+[submodule "libsamsung-ipc"]
+	path = libsamsung-ipc
+	url = https://git.replicant.us/replicant/hardware_replicant_libsamsung-ipc.git
