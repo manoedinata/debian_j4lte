@@ -1,3 +1,6 @@
 [submodule "kernel"]
 	path = kernel
 	url = https://github.com/DaunScape/android_kernel_samsung_universal7570
+[submodule "unudhcpd"]
+	path = unudhcpd
+	url = https://gitlab.com/postmarketOS/unudhcpd.git

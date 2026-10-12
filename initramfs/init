@@ -2,17 +2,74 @@
 
 export PATH=/bin
 
+# /dev/kmsg goes into the kernel ring buffer, so it survives into the next
+# boot's last_kmsg; /dev/console only reaches a live display/serial, which
+# we usually don't have attached. Log to both.
+log() {
+	echo "init: $1" >/dev/kmsg 2>/dev/null
+	echo "init: $1" >/dev/console 2>/dev/null
+}
+
 rescue_shell() {
-	echo "$1" >/dev/console
-	echo "Dropping to rescue shell." >/dev/console
-	exec /bin/busybox sh
+	log "$1"
+	log "Dropping to rescue shell."
+	# A one-shot "exec sh" dies the instant stdin has no interactive
+	# source (no serial/USB console attached yet) - sh hits EOF, exits
+	# 0, and PID 1 exiting at all panics the kernel. Loop instead, so a
+	# dead console just idles here rather than panicking.
+	while true; do
+		/bin/busybox sh
+		sleep 5
+	done
 }
 
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev || rescue_shell "Failed to mount devtmpfs."
+log "devtmpfs mounted"
 
-root=
+setup_usb_network() {
+	# This kernel builds the Samsung/AOSP downstream "android_usb"
+	# composite gadget driver (g_android, CONFIG_USB_G_ANDROID) instead
+	# of the upstream USB_CONFIGFS gadget framework postmarketOS uses -
+	# this kernel has USB_CONFIGFS disabled entirely. g_android registers
+	# this sysfs node unconditionally at boot (it's a late_initcall, not
+	# tied to a DT platform device), so if it's missing, this kernel
+	# build doesn't have USB_G_ANDROID either.
+	sysfs_dir=/sys/class/android_usb/android0
+	if [ ! -e "$sysfs_dir" ]; then
+		log "no android_usb gadget, skipping USB network setup"
+		return
+	fi
+
+	log "setting up USB network gadget (rndis) via android_usb"
+	echo 0     >"$sysfs_dir/enable"
+	echo 18D1  >"$sysfs_dir/idVendor"    # Google Inc.
+	echo D001  >"$sysfs_dir/idProduct"   # Nexus 4 (fastboot) - generic placeholder
+	echo rndis >"$sysfs_dir/functions"
+	echo 1     >"$sysfs_dir/enable"
+
+	# The rndis0 netdev is created synchronously inside the "enable"
+	# write above (android_bind_config -> gether_setup_name), but give
+	# it a few seconds in case binding to the UDC takes a moment.
+	tries=0
+	while ! ip link show rndis0 >/dev/null 2>&1 && [ "$tries" -lt 5 ]; do
+		sleep 1
+		tries=$((tries + 1))
+	done
+
+	if ifconfig rndis0 172.16.42.1 2>/dev/null; then
+		log "rndis0 up at 172.16.42.1, starting unudhcpd"
+		unudhcpd -i rndis0 -s 172.16.42.1 -c 172.16.42.2 &
+	else
+		log "rndis0 did not come up, not starting unudhcpd"
+	fi
+}
+# Backgrounded: USB tethering is best-effort rescue/debug connectivity,
+# and shouldn't delay booting to the real root when no cable is attached.
+setup_usb_network &
+
+root=/dev/mmcblk0p18
 rootfstype=ext4
 rootflags=rw
 init=/sbin/init
@@ -43,14 +100,37 @@ while [ ! -e "$root" ] && [ "$i" -lt 15 ]; do
 	i=$((i + 1))
 done
 
-[ -e "$root" ] || rescue_shell "Timed out waiting for root device: $root"
+if [ -e "$root" ]; then
+	log "found root device: $root"
+else
+	# No ueventd here, so there's no /dev/block/by-name - only raw
+	# mmcblkNpM nodes from devtmpfs. Dump both that and the kernel's own
+	# partition table so the real device/partition names show up in the
+	# next last_kmsg.
+	log "/dev/block: $(find /dev/block -maxdepth 3 2>&1)"
+	log "/proc/partitions: $(cat /proc/partitions 2>&1)"
+	rescue_shell "Timed out waiting for root device: $root"
+fi
 
 mkdir -p /mnt/root
-mount -t "$rootfstype" -o "$rootflags" "$root" /mnt/root \
-	|| rescue_shell "Failed to mount $root as $rootfstype on /mnt/root."
+if mount -t "$rootfstype" -o "$rootflags" "$root" /mnt/root; then
+	log "mounted $root ($rootfstype) on /mnt/root"
+else
+	rescue_shell "Failed to mount $root as $rootfstype on /mnt/root."
+fi
 
 for d in proc sys dev run; do
 	[ -d "/mnt/root/$d" ] || mkdir -p "/mnt/root/$d"
 done
 
+# busybox switch_root prints its generic usage/help text (not a distinct
+# error) for *any* failed precondition, including "not PID 1" or "NEW_ROOT
+# not a mountpoint" - not just a wrong arg count. Log both directly so we
+# can tell which one it actually is instead of guessing from the help text.
+log "pid=$$ /proc/mounts: $(cat /proc/mounts 2>&1)"
+log "switch_root /mnt/root $init"
+
 exec switch_root /mnt/root "$init"
+# switch_root only returns on failure - on success it execs $init and never
+# comes back here.
+rescue_shell "switch_root failed (root=$root init=$init)"
