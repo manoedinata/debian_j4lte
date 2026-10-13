@@ -8,9 +8,18 @@
 # which this kernel already has enabled (CONFIG_INPUT_UINPUT,
 # CONFIG_TOUCHSCREEN_MELFAS_MMS438, CONFIG_FRAMEBUFFER_CONSOLE).
 #
-# Not wired up as a systemd service - it's meant to be run by hand
-# (`fbkeyboard -d /dev/input/eventN`) when console input is needed,
-# not left running permanently.
+# Installs fbkeyboard.service so it starts automatically at boot and
+# stays up across VT switches (Restart=always). It's pinned to the
+# touchscreen's udev by-path symlink
+# (/dev/input/by-path/platform-13840000.i2c-event) rather than an
+# eventN number, since that's the Melfas touchscreen's fixed i2c
+# controller address in the devicetree - stable across boots,
+# unlike event node numbering which depends on driver probe order.
+# Ordering the unit on the by-path device itself (systemd .device
+# unit) turned out to hang the start job on this system - udev marks
+# it "loaded" but never "active" even though the symlink already
+# exists - so this just relies on Restart=always to retry until the
+# node is there instead.
 #
 # Builds from the fbkeyboard git submodule (manoedinata/fbkeyboard, a
 # fork of bakonyiferenc/fbkeyboard), not vanilla upstream. Upstream
@@ -61,6 +70,22 @@ sudo install -m 755 "$ROOTFS_DIR/usr/local/src/fbkeyboard/fbkeyboard" "$ROOTFS_D
 
 sudo umount "$ROOTFS_DIR/dev" "$ROOTFS_DIR/proc" "$ROOTFS_DIR/sys"
 
+echo "==> installing fbkeyboard.service"
+sudo install -d -m 755 "$ROOTFS_DIR/etc/systemd/system"
+sudo tee "$ROOTFS_DIR/etc/systemd/system/fbkeyboard.service" >/dev/null <<'EOF'
+[Unit]
+Description=On-screen keyboard for the framebuffer console
+After=systemd-udevd.service
+
+[Service]
+ExecStart=/usr/local/bin/fbkeyboard -d /dev/input/by-path/platform-13840000.i2c-event -f /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo install -d -m 755 "$ROOTFS_DIR/etc/systemd/system/multi-user.target.wants"
+sudo ln -sf /etc/systemd/system/fbkeyboard.service "$ROOTFS_DIR/etc/systemd/system/multi-user.target.wants/fbkeyboard.service"
+
 echo "==> done"
-echo "run with: fbkeyboard -d /dev/input/eventN -f /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-echo "(check /proc/bus/input/devices for the Melfas touchscreen's eventN)"
