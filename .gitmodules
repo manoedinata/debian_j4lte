@@ -7,3 +7,6 @@
 [submodule "libsamsung-ipc"]
 	path = libsamsung-ipc
 	url = https://git.replicant.us/replicant/hardware_replicant_libsamsung-ipc.git
+[submodule "fbkeyboard"]
+	path = fbkeyboard
+	url = https://github.com/manoedinata/fbkeyboard.git
