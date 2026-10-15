@@ -6,7 +6,8 @@
 	url = https://github.com/manoedinata/samsungipcd.git
 [submodule "libsamsung-ipc"]
 	path = libsamsung-ipc
-	url = https://git.replicant.us/replicant/hardware_replicant_libsamsung-ipc.git
+	url = https://github.com/manoedinata/libsamsung-ipc.git
+	branch = shannon-lte-data
 [submodule "fbkeyboard"]
 	path = fbkeyboard
 	url = https://github.com/manoedinata/fbkeyboard.git

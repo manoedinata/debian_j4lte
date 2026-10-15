@@ -1,13 +1,14 @@
 #!/bin/bash
 #
-# Cross-compiles samsungipcd (git submodule - carries two local fixes
+# Cross-compiles samsungipcd (git submodule - carries local fixes
 # committed directly on top of upstream, see its own `git log`) and
-# its dependency libsamsung-ipc (git submodule, pinned to commit
-# 7ce1371f, the last commit with herolte
-# (Shannon) device support before an unrelated libcurl build
-# dependency was added upstream) using the same gcc-6-aarch64-linux-gnu
-# toolchain container as build_kernel.sh, and installs the results
-# into debootstrap-rootfs.
+# its dependency libsamsung-ipc (git submodule: the manoedinata fork,
+# branch shannon-lte-data, which is upstream commit 7ce1371f - the last
+# commit with herolte (Shannon) device support before an unrelated
+# libcurl build dependency was added upstream - plus the messages that
+# Shannon modems need for packet data) using the same
+# gcc-6-aarch64-linux-gnu toolchain container as build_kernel.sh, and
+# installs the results into debootstrap-rootfs.
 #
 # libsamsung-ipc has no device profile for the J4's modem
 # (ss310ap/ss305ap). Its board-detection fallback (see
