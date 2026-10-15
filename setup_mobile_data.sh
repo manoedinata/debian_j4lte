@@ -9,26 +9,24 @@
 #  - The kernel (CONFIG_TTY_GSM_VIRTUAL, drivers/tty/ttygsm.c) registers
 #    /dev/ttyGSM0 and /dev/ttyGSM1 as real tty devices plus master nodes
 #    /dev/ttygsm-master0/1. samsungipcd opens the master nodes and
-#    emulates a modem's AT/PPP interface on them on top of Samsung's IPC
+#    emulates a modem's AT interface on them on top of Samsung's IPC
 #    protocol (boots the J4's modem from the RADIO partition via the
 #    herolte/Shannon profile of libsamsung-ipc).
-#  - A udev rule groups the two ttys into one device for ModemManager
-#    (ttyGSM0 = primary AT port, ttyGSM1 = PPP data port).
-#  - ModemManager dials (ATD) on the data port and reports a PPP bearer;
-#    NetworkManager then runs pppd on that port through its pppd plugin.
-#    That needs CONFIG_PPP_ASYNC=y in the kernel (N_PPP line discipline).
-#    samsungipcd answers LCP/PAP/IPCP itself, NetworkManager gets ppp0
-#    with address, routes and DNS from it.
-#  - The profile below uses route-metric 900, so WiFi/USB are preferred
-#    and mobile data is the fallback.
+#  - A udev rule groups the two ttys and the modem driver's network
+#    interface rmnet0 into one device for ModemManager and ties it to the
+#    samsungipcd plugin (rmnet1-7 and umts_dm0 of the same driver are ignored).
+#  - The samsungipcd ModemManager plugin (mm-plugin-samsungipcd/, built by
+#    build_mm_plugin.sh) is the way regular modems with a network interface are
+#    handled: it activates the data session with AT+CGACT, reads the address and
+#    DNS with AT+CGCONTRDP and reports them as a static IP configuration on
+#    rmnet0. NetworkManager puts that on rmnet0 itself. No PPP, no ppp0 and
+#    nothing passes through samsungipcd: the kernel's modem driver carries the
+#    packets.
+#  - The NetworkManager profile below uses route-metric 900, so WiFi/USB are
+#    preferred and mobile data is the fallback.
 #
-# Note how data flows: samsungipcd injects the IPv4 packets pppd sends
-# into rmnet0 itself, replies arrive on rmnet0 and go straight to the
-# host stack, so ppp0's RX counters stay near zero and sockets must not
-# be bound to ppp0 (ping -I ppp0 cannot work).
-#
-# The first dial after boot can fail while the modem re-registers after
-# the LTE attach profile was sent; NetworkManager retries on its own.
+# The first activation after boot can fail while the modem re-registers after
+# the LTE attach profile was sent; the plugin retries, and so does NetworkManager.
 #
 # APN: Telkomsel by default; APN=xyz ./setup_mobile_data.sh for another
 # one, or later `nmcli connection modify "Mobile data" gsm.apn xyz`.
@@ -40,6 +38,8 @@ APN="${APN:-internet}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOTFS_DIR="$SCRIPT_DIR/debootstrap-rootfs"
 BUILD_DIR="$SCRIPT_DIR/misc-files/samsungipcd"
+PLUGIN_SO="$BUILD_DIR/libmm-plugin-samsungipcd.so"
+PLUGIN_DIR="$ROOTFS_DIR/usr/lib/aarch64-linux-gnu/ModemManager"
 
 if [ ! -d "$ROOTFS_DIR" ]; then
 	echo "error: missing $ROOTFS_DIR" >&2
@@ -47,6 +47,10 @@ if [ ! -d "$ROOTFS_DIR" ]; then
 fi
 if [ ! -x "$BUILD_DIR/samsungipcd" ]; then
 	echo "error: $BUILD_DIR/samsungipcd not found - run ./build_samsungipcd.sh first" >&2
+	exit 1
+fi
+if [ ! -f "$PLUGIN_SO" ]; then
+	echo "error: $PLUGIN_SO not found - run ./build_mm_plugin.sh first" >&2
 	exit 1
 fi
 
@@ -64,12 +68,15 @@ sudo ln -sf libsamsung-ipc.so.0.0.0 "$ROOTFS_DIR/usr/lib/aarch64-linux-gnu/libsa
 sudo ln -sf libsamsung-ipc.so.0.0.0 "$ROOTFS_DIR/usr/lib/aarch64-linux-gnu/libsamsung-ipc.so"
 sudo chroot "$ROOTFS_DIR" ldconfig
 
+echo "==> installing the samsungipcd ModemManager plugin"
+sudo install -D -o root -g root -m 0755 "$PLUGIN_SO" "$PLUGIN_DIR/libmm-plugin-samsungipcd.so"
+
 echo "==> installing samsungipcd.service (enabled)"
 sudo install -d -m 755 "$ROOTFS_DIR/etc/systemd/system"
 sudo tee "$ROOTFS_DIR/etc/systemd/system/samsungipcd.service" >/dev/null <<'EOF'
 [Unit]
 Description=Samsung IPC modem AT command proxy (ss310ap/herolte profile)
-# ModemManager probes the ports once, when it starts; samsungipcd has to be
+# ModemManager probes the ports once, when it sees them; samsungipcd has to be
 # answering by then or it gives up on them until the next rescan
 Before=ModemManager.service
 
@@ -88,18 +95,9 @@ EOF
 sudo install -d -m 755 "$ROOTFS_DIR/etc/systemd/system/multi-user.target.wants"
 sudo ln -sf /etc/systemd/system/samsungipcd.service "$ROOTFS_DIR/etc/systemd/system/multi-user.target.wants/samsungipcd.service"
 
-echo "==> installing the udev rule that groups the ports for ModemManager"
-sudo install -d -m 755 "$ROOTFS_DIR/etc/udev/rules.d"
-sudo tee "$ROOTFS_DIR/etc/udev/rules.d/77-mm-samsungipcd.rules" >/dev/null <<'EOF'
-# samsungipcd modem ports (kernel ttygsm driver): one modem, two AT ports.
-# Without a common ID_MM_PHYSDEV_UID ModemManager makes one modem per tty.
-ACTION!="add|change|move|bind", GOTO="mm_samsungipcd_end"
-SUBSYSTEM!="tty", GOTO="mm_samsungipcd_end"
-KERNEL=="ttyGSM[0-9]*", ENV{ID_MM_PHYSDEV_UID}="samsungipcd"
-KERNEL=="ttyGSM0", ENV{ID_MM_PORT_TYPE_AT_PRIMARY}="1"
-KERNEL=="ttyGSM1", ENV{ID_MM_PORT_TYPE_AT_PPP}="1"
-LABEL="mm_samsungipcd_end"
-EOF
+echo "==> installing the udev rules for the plugin"
+sudo install -D -o root -g root -m 0644 "$SCRIPT_DIR/mm-plugin-samsungipcd/77-mm-samsungipcd.rules" \
+	"$ROOTFS_DIR/etc/udev/rules.d/77-mm-samsungipcd.rules"
 
 echo "==> installing the NetworkManager mobile broadband profile (APN: $APN)"
 sudo install -d -m 755 "$ROOTFS_DIR/etc/NetworkManager/system-connections"
@@ -128,17 +126,11 @@ else
 	echo "    (profile exists, kept - change it with nmcli)"
 fi
 
-echo "==> NetworkManager: leave the modem's raw rmnet0 alone"
-# samsungipcd injects packets into rmnet0 itself (a raw point-to-point
-# interface without ARP); NetworkManager managing it would only fight.
-sudo install -d -m 755 "$ROOTFS_DIR/etc/NetworkManager/conf.d"
-sudo tee "$ROOTFS_DIR/etc/NetworkManager/conf.d/10-unmanaged-rmnet0.conf" >/dev/null <<'EOF'
-[keyfile]
-unmanaged-devices=interface-name:rmnet0
-EOF
-
-echo "==> removing the previous mobile-data service, if present"
-sudo rm -f "$ROOTFS_DIR/etc/systemd/system/multi-user.target.wants/mobile-data.service" \
+echo "==> removing leftovers of the previous setups, if present"
+# rmnet0 used to be marked unmanaged; with the plugin NetworkManager configures
+# it as the modem's interface and that rule is not needed (nor wanted) any more
+sudo rm -f "$ROOTFS_DIR/etc/NetworkManager/conf.d/10-unmanaged-rmnet0.conf" \
+	"$ROOTFS_DIR/etc/systemd/system/multi-user.target.wants/mobile-data.service" \
 	"$ROOTFS_DIR/etc/systemd/system/mobile-data.service" \
 	"$ROOTFS_DIR/usr/sbin/mobile-data" \
 	"$ROOTFS_DIR/etc/NetworkManager/dispatcher.d/90-mobile-data" \
@@ -147,6 +139,6 @@ sudo rm -f "$ROOTFS_DIR/etc/systemd/system/multi-user.target.wants/mobile-data.s
 
 echo "==> done"
 echo
-echo "Needs a kernel with CONFIG_TTY_GSM_VIRTUAL and CONFIG_PPP_ASYNC (see kernel/)."
+echo "Needs a kernel with CONFIG_TTY_GSM_VIRTUAL (see kernel/); CONFIG_PPP_ASYNC is no longer needed."
 echo "Mobile data comes up on its own at boot (NetworkManager retries the first dial)."
-echo "Check with: mmcli -L; nmcli connection show --active; ip addr show ppp0"
+echo "Check with: mmcli -L; mmcli -b 0; nmcli connection show --active; ip addr show rmnet0"
