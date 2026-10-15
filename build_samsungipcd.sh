@@ -89,6 +89,8 @@ echo "==> staging the rootfs's OpenSSL (dev files) as a cross sysroot"
 docker exec "$CONTAINER_NAME" rm -rf "$OPENSSL_SYSROOT"
 docker exec "$CONTAINER_NAME" mkdir -p "$OPENSSL_SYSROOT/usr/include" "$OPENSSL_SYSROOT/usr/lib/aarch64-linux-gnu/pkgconfig"
 docker cp "$ROOTFS_DIR/usr/include/openssl" "$CONTAINER_NAME:$OPENSSL_SYSROOT/usr/include/openssl"
+docker exec "$CONTAINER_NAME" mkdir -p "$OPENSSL_SYSROOT/usr/include/aarch64-linux-gnu"
+docker cp "$ROOTFS_DIR/usr/include/aarch64-linux-gnu/openssl" "$CONTAINER_NAME:$OPENSSL_SYSROOT/usr/include/aarch64-linux-gnu/openssl"
 for f in libssl.so libssl.so.1.1 libcrypto.so libcrypto.so.1.1; do
 	docker cp "$ROOTFS_DIR/usr/lib/aarch64-linux-gnu/$f" "$CONTAINER_NAME:$OPENSSL_SYSROOT/usr/lib/aarch64-linux-gnu/$f"
 done
@@ -123,7 +125,7 @@ rm -rf .git
 ./autogen.sh
 ./configure --host=aarch64-linux-gnu CC=aarch64-linux-gnu-gcc-6 \
 	--prefix=/usr --sysconfdir=/etc \
-	CFLAGS="-Dloff_t=off_t -DIPC_DEVICE_NAME='\"herolte\"'" \
+	CFLAGS="-Dloff_t=off_t -DIPC_DEVICE_NAME='\"herolte\"' -I$OPENSSL_SYSROOT/usr/include -I$OPENSSL_SYSROOT/usr/include/aarch64-linux-gnu" \
 	LDFLAGS="-L$OPENSSL_SYSROOT/usr/lib/aarch64-linux-gnu -Wl,-rpath-link,$OPENSSL_SYSROOT/usr/lib/aarch64-linux-gnu"
 make -j"$(nproc)"
 make install DESTDIR="$SYSROOT"
