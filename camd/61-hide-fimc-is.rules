@@ -1,0 +1,6 @@
+# The FIMC-IS camera nodes answer VIDIOC_ENUM_FMT with success forever, so
+# anything that enumerates /dev/video* formats (GStreamer's device provider,
+# i.e. Cheese) loops until memory runs out and the low-memory killer takes out
+# Xorg. Hide them; camd opens its own nodes under /dev/camd made from the sysfs dev numbers.
+# Remove this once the driver's enum_fmt handlers return -EINVAL.
+SUBSYSTEM=="video4linux", ATTR{name}=="exynos-fimc-is-*", RUN+="/bin/rm -f /dev/%k"

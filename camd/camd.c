@@ -24,6 +24,9 @@
 #include <unistd.h>
 #include <time.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
+#include <sys/types.h>
 #include <sys/mman.h>
 #include <linux/videodev2.h>
 #define _LINUX_TYPES_H /* header typedefs clash with libc; stdint is already in */
@@ -80,6 +83,7 @@ struct buf {
 
 struct node {
 	const char *name;
+	const char *sysname;	/* name in sysfs video4linux dir */
 	int vid;
 	int fd;
 	enum v4l2_buf_type type;
@@ -88,13 +92,13 @@ struct node {
 	struct buf buf[MAXBUF];
 };
 
-static struct node n_ss0 = { "ss0",  VID_SS0, -1, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE };
-static struct node n_30s = { "3aa",  VID_30S, -1, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE };
-static struct node n_30p = { "3aap", VID_30P, -1, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE };
-static struct node n_i0s = { "isp",  VID_I0S, -1, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE };
-static struct node n_i0p = { "ispp", VID_I0P, -1, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE };
-static struct node n_m0s = { "mcs",  VID_M0S, -1, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE };
-static struct node n_m0p = { "mcsp", VID_M0P, -1, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE };
+static struct node n_ss0 = { "ss0",  "exynos-fimc-is-ss0", VID_SS0, -1, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE };
+static struct node n_30s = { "3aa",  "exynos-fimc-is-30s", VID_30S, -1, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE };
+static struct node n_30p = { "3aap", "exynos-fimc-is-30p", VID_30P, -1, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE };
+static struct node n_i0s = { "isp",  "exynos-fimc-is-i0s", VID_I0S, -1, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE };
+static struct node n_i0p = { "ispp", "exynos-fimc-is-i0p", VID_I0P, -1, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE };
+static struct node n_m0s = { "mcs",  "exynos-fimc-is-m0s", VID_M0S, -1, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE };
+static struct node n_m0p = { "mcsp", "exynos-fimc-is-m0p", VID_M0P, -1, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE };
 
 static struct node *all_nodes[] = {
 	&n_ss0, &n_30s, &n_30p, &n_i0s, &n_i0p, &n_m0s, &n_m0p,
@@ -164,14 +168,64 @@ static void node_free_bufs(struct node *n)
 /* V4L2 helpers                                                        */
 /* ------------------------------------------------------------------ */
 
+/*
+ * The FIMC-IS nodes answer VIDIOC_ENUM_FMT with success forever, which
+ * makes format enumerators (GStreamer's device provider, hence Cheese)
+ * loop until memory runs out. A udev rule therefore removes them from /dev,
+ * and we make private nodes under /dev/camd (devtmpfs; /run is nodev) from the sysfs dev numbers.
+ */
 static int node_open(struct node *n)
 {
-	char path[32];
+	char path[64], buf[64];
+	DIR *d;
+	struct dirent *e;
+	int major = -1, minor = -1;
 
-	snprintf(path, sizeof(path), "/dev/video%d", 100 + n->vid);
-	n->fd = open(path, O_RDWR | O_CLOEXEC);
+	d = opendir("/sys/class/video4linux");
+	if (!d) {
+		LOG("opendir /sys/class/video4linux: %s", strerror(errno));
+		return -1;
+	}
+	while ((e = readdir(d))) {
+		FILE *f;
+		char name[64] = "";
+
+		if (strncmp(e->d_name, "video", 5))
+			continue;
+		snprintf(path, sizeof(path), "/sys/class/video4linux/%s/name", e->d_name);
+		f = fopen(path, "r");
+		if (!f)
+			continue;
+		if (fgets(name, sizeof(name), f))
+			name[strcspn(name, "\n")] = 0;
+		fclose(f);
+		if (strcmp(name, n->sysname))
+			continue;
+		snprintf(path, sizeof(path), "/sys/class/video4linux/%s/dev", e->d_name);
+		f = fopen(path, "r");
+		if (f) {
+			if (fscanf(f, "%d:%d", &major, &minor) != 2)
+				major = minor = -1;
+			fclose(f);
+		}
+		break;
+	}
+	closedir(d);
+	if (major < 0) {
+		LOG("%s: no video device named %s", n->name, n->sysname);
+		return -1;
+	}
+
+	mkdir("/dev/camd", 0700);
+	snprintf(buf, sizeof(buf), "/dev/camd/%s", n->sysname);
+	unlink(buf);
+	if (mknod(buf, S_IFCHR | 0600, makedev(major, minor))) {
+		LOG("mknod %s: %s", buf, strerror(errno));
+		return -1;
+	}
+	n->fd = open(buf, O_RDWR | O_CLOEXEC);
 	if (n->fd < 0) {
-		LOG("open %s (%s): %s", path, n->name, strerror(errno));
+		LOG("open %s (%s): %s", buf, n->name, strerror(errno));
 		return -1;
 	}
 	return 0;

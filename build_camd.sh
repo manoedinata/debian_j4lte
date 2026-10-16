@@ -82,4 +82,8 @@ sudo ln -sfn /vendor/firmware "$ROOTFS_DIR/system/vendor/firmware"
 sudo install -d -m 755 "$ROOTFS_DIR/etc/udev/rules.d"
 sudo install -o root -g root -m 644 "$SRC_DIR/60-persistent-v4l.rules" "$ROOTFS_DIR/etc/udev/rules.d/60-persistent-v4l.rules"
 
+# The FIMC-IS nodes answer ENUM_FMT forever (breaks Cheese & friends): hide
+# them from /dev; camd makes its own under /dev/camd.
+sudo install -o root -g root -m 644 "$SRC_DIR/61-hide-fimc-is.rules" "$ROOTFS_DIR/etc/udev/rules.d/61-hide-fimc-is.rules"
+
 echo "==> done"
