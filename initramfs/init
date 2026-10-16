@@ -117,6 +117,21 @@ for d in proc sys dev run; do
 	[ -d "/mnt/root/$d" ] || mkdir -p "/mnt/root/$d"
 done
 
+# Mount the stock VENDOR partition (camera/MFC firmware, see
+# firmware_class.path=/vendor/firmware) read-only before userspace starts.
+# Left to fstab, vendor.mount only comes up once udev has announced the
+# device (~22 s), by which time udev's v4l_id probing has already opened the
+# FIMC-IS/MFC nodes and their request_firmware() calls failed with -2.
+# Best effort: systemd adopts an already-mounted /vendor from fstab as-is.
+vendor_dev=/dev/mmcblk0p19
+if [ -e "$vendor_dev" ] && [ -d /mnt/root/vendor ]; then
+	if mount -t ext4 -o ro "$vendor_dev" /mnt/root/vendor; then
+		log "mounted $vendor_dev (ro) on /mnt/root/vendor"
+	else
+		log "failed to mount $vendor_dev on /mnt/root/vendor, continuing"
+	fi
+fi
+
 # busybox switch_root prints its generic usage/help text (not a distinct
 # error) for *any* failed precondition, including "not PID 1" or "NEW_ROOT
 # not a mountpoint" - not just a wrong arg count. Log both directly so we
