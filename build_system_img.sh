@@ -12,10 +12,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOTFS_DIR="$SCRIPT_DIR/debootstrap-rootfs"
 OUT_DIR="$SCRIPT_DIR/misc-files"
-OUT_IMG="system.img"
+OUT_IMG="${OUT_IMG:-system.img}"
 CONTAINER_NAME="j4-e2fsprogs"
 
 # SYSTEM partition size from notes.txt (blockdev --getsize64): 2625634304 bytes.
+# (SIZE/LABEL/OUT_IMG can be overridden to build an image for another partition, e.g. USERDATA.)
 SIZE="${SIZE:-2504M}"
 LABEL="${LABEL:-system}"
 # Stock SYSTEM's feature set (see notes.txt) lacks resize_inode, has_journal,

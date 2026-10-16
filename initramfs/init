@@ -55,14 +55,18 @@ setup_usb_network() {
 }
 setup_usb_network
 
-root=/dev/mmcblk0p18
+# Default root is USERDATA (mmcblk0p25); SYSTEM (mmcblk0p18) is the fallback
+# if USERDATA does not mount (e.g. it still holds Android's data partition).
+# An explicit root= on the kernel cmdline disables the fallback.
+root=/dev/mmcblk0p25
+fallback_root=/dev/mmcblk0p18
 rootfstype=ext4
 rootflags=rw
 init=/sbin/init
 
 for arg in $(cat /proc/cmdline); do
 	case "$arg" in
-		root=*)       root="${arg#root=}" ;;
+		root=*)       root="${arg#root=}"; fallback_root="" ;;
 		rootfstype=*) rootfstype="${arg#rootfstype=}" ;;
 		rootflags=*)  rootflags="${arg#rootflags=}" ;;
 		init=*)       init="${arg#init=}" ;;
@@ -101,6 +105,10 @@ fi
 mkdir -p /mnt/root
 if mount -t "$rootfstype" -o "$rootflags" "$root" /mnt/root; then
 	log "mounted $root ($rootfstype) on /mnt/root"
+elif [ -n "$fallback_root" ] && [ -e "$fallback_root" ] &&
+		mount -t "$rootfstype" -o "$rootflags" "$fallback_root" /mnt/root; then
+	log "failed to mount $root, mounted fallback $fallback_root ($rootfstype) on /mnt/root"
+	root="$fallback_root"
 else
 	rescue_shell "Failed to mount $root as $rootfstype on /mnt/root."
 fi
