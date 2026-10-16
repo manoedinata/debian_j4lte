@@ -10,7 +10,8 @@ After=local-fs.target
 # leading '-' tolerates it already being loaded when the service restarts.
 ExecStartPre=-/sbin/insmod /usr/local/lib/camd/v4l2loopback.ko devices=1 video_nr=20 exclusive_caps=1 "card_label=\"J4 Rear Camera\""
 # the sensor sits sideways in the phone: rotate 90 degrees clockwise (0/90/180/270)
-ExecStart=/usr/local/sbin/camd -d /dev/video20 -r 90
+# published size after rotation; the MCSC hardware scaler does the shrinking for free
+ExecStart=/usr/local/sbin/camd -d /dev/video20 -r 90 -s 480x640
 Restart=on-failure
 # do not hammer the camera driver if bring-up keeps failing
 RestartSec=10

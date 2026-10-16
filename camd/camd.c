@@ -9,7 +9,8 @@
  * seconds without readers stops it again.
  *
  * Build on the phone:  gcc -I. -O2 -o camd camd.c
- * Run:                 camd [-d /dev/video20] [-r 0|90|180|270] [-v]
+ * Run:                 camd [-d /dev/video20] [-r 0|90|180|270] [-s WxH] [-v]
+ *                      -s is the PUBLISHED size (after rotation), default 480x640
  */
 #define _GNU_SOURCE
 #include <stdint.h>
@@ -48,13 +49,14 @@
 
 #define SENSOR_3L2	8
 
-/* 3L2 mode 3: 2072x1552 @30 fps, scaled to a 4:3 NV12 output */
+/*
+ * 3L2 mode 3: 2072x1552 @30 fps. The MCSC hardware scaler shrinks it to
+ * out_w x out_h (4:3, set by -s) at no CPU cost; everything downstream
+ * (rotation, the readers' colour conversion) scales with the pixel count.
+ */
 #define SEN_W		2072
 #define SEN_H		1552
-#define OUT_W		1280
-#define OUT_H		960
 #define OUT_FPS		30
-#define OUT_SIZE	(OUT_W * OUT_H * 3 / 2)	/* NV12 frame size, rotation-independent */
 
 #define SPARE_SIZE	(32 * 1024)
 #define MAXBUF		4
@@ -65,8 +67,10 @@
 #define SCAN_MS_RUN	2000
 
 static int verbose;
+static int out_w = 640, out_h = 480;	/* MCSC output (sensor orientation), from -s */
+static int out_size;			/* NV12 frame size = out_w * out_h * 3 / 2 */
 static int rotation = 90;	/* degrees clockwise applied before publishing: 0, 90, 180, 270 */
-static int pub_w = OUT_W, pub_h = OUT_H;	/* published frame size (swapped for 90/270) */
+static int pub_w, pub_h;	/* published frame size (swapped for 90/270) */
 static unsigned char *rot_buf;
 static volatile sig_atomic_t quit;
 
@@ -476,7 +480,7 @@ static void fill_shot(struct node *leader, int index, uint32_t fcount)
 	s->node_group.capture[2].vid = VID_M0P;
 	s->node_group.capture[2].request = 1;
 	fill_crop(s->node_group.capture[2].input.cropRegion, SEN_W, SEN_H);
-	fill_crop(s->node_group.capture[2].output.cropRegion, OUT_W, OUT_H);
+	fill_crop(s->node_group.capture[2].output.cropRegion, out_w, out_h);
 }
 
 /* ------------------------------------------------------------------ */
@@ -526,7 +530,7 @@ static int cam_start(void)
 	    s_fmt(&n_i0s, V4L2_PIX_FMT_SBGGR10, SEN_W, SEN_H) ||
 	    s_fmt(&n_i0p, V4L2_PIX_FMT_NV21, SEN_W, SEN_H) ||
 	    s_fmt(&n_m0s, V4L2_PIX_FMT_NV21, SEN_W, SEN_H) ||
-	    s_fmt(&n_m0p, V4L2_PIX_FMT_NV12, OUT_W, OUT_H))
+	    s_fmt(&n_m0p, V4L2_PIX_FMT_NV12, out_w, out_h))
 		goto fail;
 
 	{
@@ -543,8 +547,8 @@ static int cam_start(void)
 	if (reqbufs_dmabuf(&n_30s, NBUF, 0) || reqbufs_dmabuf(&n_i0s, NBUF, 0) ||
 	    reqbufs_dmabuf(&n_m0s, NBUF, 0) || reqbufs_dmabuf(&n_m0p, NBUF, 1))
 		goto fail;
-	if (n_m0p.buf[0].img_len < OUT_SIZE) {
-		LOG("M0P image plane too small (%u < %d)", n_m0p.buf[0].img_len, OUT_SIZE);
+	if (n_m0p.buf[0].img_len < out_size) {
+		LOG("M0P image plane too small (%u < %d)", n_m0p.buf[0].img_len, out_size);
 		goto fail;
 	}
 
@@ -565,7 +569,7 @@ static int cam_start(void)
 	if (s_ctrl(&n_ss0, CID_IS_S_STREAM, 1, "S_STREAM"))
 		goto fail;
 	stream_on = 1;
-	LOG("camera streaming (%dx%d NV12)", OUT_W, OUT_H);
+	LOG("camera streaming (%dx%d NV12)", out_w, out_h);
 	return 0;
 
 fail:
@@ -617,24 +621,24 @@ DEFINE_ROT(rot180_16, unsigned short, (size_t)(h - 1 - y) * w + (w - 1 - x))
 /* rotate an NV12 frame (Y plane + interleaved UV plane) clockwise by deg */
 static void rotate_nv12(const unsigned char *src, unsigned char *dst, int deg)
 {
-	const unsigned char *suv = src + OUT_W * OUT_H;
-	unsigned char *duv = dst + OUT_W * OUT_H;
+	const unsigned char *suv = src + out_w * out_h;
+	unsigned char *duv = dst + out_w * out_h;
 
 	switch (deg) {
 	case 90:
-		rot90_8(src, dst, OUT_W, OUT_H);
+		rot90_8(src, dst, out_w, out_h);
 		rot90_16((const unsigned short *)suv, (unsigned short *)duv,
-			 OUT_W / 2, OUT_H / 2);
+			 out_w / 2, out_h / 2);
 		break;
 	case 270:
-		rot270_8(src, dst, OUT_W, OUT_H);
+		rot270_8(src, dst, out_w, out_h);
 		rot270_16((const unsigned short *)suv, (unsigned short *)duv,
-			  OUT_W / 2, OUT_H / 2);
+			  out_w / 2, out_h / 2);
 		break;
 	default:
-		rot180_8(src, dst, OUT_W, OUT_H);
+		rot180_8(src, dst, out_w, out_h);
 		rot180_16((const unsigned short *)suv, (unsigned short *)duv,
-			  OUT_W / 2, OUT_H / 2);
+			  out_w / 2, out_h / 2);
 		break;
 	}
 }
@@ -660,7 +664,7 @@ static int loop_open(const char *path)
 	f.fmt.pix.pixelformat = V4L2_PIX_FMT_NV12;
 	f.fmt.pix.field = V4L2_FIELD_NONE;
 	f.fmt.pix.bytesperline = pub_w;
-	f.fmt.pix.sizeimage = OUT_SIZE;
+	f.fmt.pix.sizeimage = out_size;
 	f.fmt.pix.colorspace = V4L2_COLORSPACE_SRGB;
 	if (ioctl(fd, VIDIOC_S_FMT, &f)) {
 		LOG("S_FMT on %s: %s", path, strerror(errno));
@@ -679,12 +683,12 @@ static int loop_open(const char *path)
 	 * a black placeholder to find.
 	 */
 	{
-		unsigned char *blank = malloc(OUT_SIZE);
+		unsigned char *blank = malloc(out_size);
 
 		if (blank) {
 			memset(blank, 16, pub_w * pub_h);
 			memset(blank + pub_w * pub_h, 128, pub_w * pub_h / 2);
-			if (write(fd, blank, OUT_SIZE) != OUT_SIZE)
+			if (write(fd, blank, out_size) != out_size)
 				LOG("placeholder write: %s", strerror(errno));
 			free(blank);
 		}
@@ -783,9 +787,9 @@ static int run_stream(int loop_fd, const char *path)
 		ion_sync_fd(n_m0p.buf[idx].fd[0]);
 		if (rotation) {
 			rotate_nv12(n_m0p.buf[idx].img, rot_buf, rotation);
-			if (write(loop_fd, rot_buf, OUT_SIZE) != OUT_SIZE)
+			if (write(loop_fd, rot_buf, out_size) != out_size)
 				DBG("loopback write: %s", strerror(errno));
-		} else if (write(loop_fd, n_m0p.buf[idx].img, OUT_SIZE) != OUT_SIZE) {
+		} else if (write(loop_fd, n_m0p.buf[idx].img, out_size) != out_size) {
 			DBG("loopback write: %s", strerror(errno));
 		}
 		frames++;
@@ -818,7 +822,9 @@ int main(int argc, char **argv)
 	int loop_fd, opt;
 	struct sigaction sa;
 
-	while ((opt = getopt(argc, argv, "d:r:v")) != -1) {
+	int want_w = 480, want_h = 640;
+
+	while ((opt = getopt(argc, argv, "d:r:s:v")) != -1) {
 		switch (opt) {
 		case 'd':
 			path = optarg;
@@ -830,11 +836,18 @@ int main(int argc, char **argv)
 				return 2;
 			}
 			break;
+		case 's':
+			if (sscanf(optarg, "%dx%d", &want_w, &want_h) != 2 ||
+			    want_w < 64 || want_h < 64 || want_w > 1920 || want_h > 1920) {
+				fprintf(stderr, "-s expects WxH, e.g. 480x640\n");
+				return 2;
+			}
+			break;
 		case 'v':
 			verbose = 1;
 			break;
 		default:
-			fprintf(stderr, "usage: %s [-d /dev/videoN] [-r 0|90|180|270] [-v]\n", argv[0]);
+			fprintf(stderr, "usage: %s [-d /dev/videoN] [-r 0|90|180|270] [-s WxH] [-v]\n", argv[0]);
 			return 2;
 		}
 	}
@@ -847,11 +860,24 @@ int main(int argc, char **argv)
 	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGTERM, &sa, NULL);
 
+	/* the scaler works in sensor orientation: swap for 90/270 */
+	pub_w = want_w;
+	pub_h = want_h;
 	if (rotation == 90 || rotation == 270) {
-		pub_w = OUT_H;
-		pub_h = OUT_W;
+		out_w = want_h;
+		out_h = want_w;
+	} else {
+		out_w = want_w;
+		out_h = want_h;
 	}
-	rot_buf = malloc(OUT_SIZE);
+	/* MCSC strides are 16-byte aligned; keep frames tightly packed */
+	if ((out_w % 16) || (out_h % 2)) {
+		fprintf(stderr, "scaler width must be a multiple of 16 and height even (got %dx%d)\n",
+			out_w, out_h);
+		return 2;
+	}
+	out_size = out_w * out_h * 3 / 2;
+	rot_buf = malloc(out_size);
 	if (!rot_buf) {
 		LOG("out of memory");
 		return 1;
