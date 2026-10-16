@@ -26,6 +26,7 @@
 #include <time.h>
 #include <sys/ioctl.h>
 #include <sys/file.h>
+#include <sys/wait.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
@@ -741,6 +742,28 @@ static int loop_open(const char *path)
 	return fd;
 }
 
+/*
+ * udev ran v4l_id when the loopback module was loaded, before we had written
+ * a frame, so the node was tagged :video_output: only. Apps like Cheese list
+ * cameras by ID_V4L_CAPABILITIES=:capture:, so ask udev to look again now.
+ */
+static void retrigger_udev(const char *path)
+{
+	const char *base = strrchr(path, '/');
+	char match[64];
+	pid_t pid;
+
+	base = base ? base + 1 : path;
+	snprintf(match, sizeof(match), "--sysname-match=%s", base);
+	pid = fork();
+	if (pid == 0) {
+		execlp("udevadm", "udevadm", "trigger", "--action=change", match, (char *)NULL);
+		_exit(127);
+	}
+	if (pid > 0)
+		waitpid(pid, NULL, 0);
+}
+
 /* does any process other than us hold the loopback node open? */
 static int has_reader(const char *path)
 {
@@ -952,6 +975,7 @@ int main(int argc, char **argv)
 	loop_fd = loop_open(path);
 	if (loop_fd < 0)
 		return 1;
+	retrigger_udev(path);
 	LOG("%s camera: publishing %dx%d NV12 (rotated %d) on %s; waiting for a reader", cam->name, pub_w, pub_h, rotation, path);
 
 	while (!quit) {
