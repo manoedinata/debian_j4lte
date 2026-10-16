@@ -1,0 +1,3 @@
+# Intentionally empty - overrides /lib/udev/rules.d/60-persistent-v4l.rules.
+# That rule runs v4l_id on every /dev/video* at boot, opening all the FIMC-IS2
+# camera nodes concurrently, which crashes or wedges the driver.

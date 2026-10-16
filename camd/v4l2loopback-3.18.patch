@@ -1,0 +1,18 @@
+diff --git a/v4l2loopback.c b/v4l2loopback.c
+index 7e47a43..2ab2f43 100644
+--- a/v4l2loopback.c
++++ b/v4l2loopback.c
+@@ -735,8 +735,13 @@ static int vidioc_querycap(struct file *file, void *priv,
+ 		}
+ 	}
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 19, 0)
+ 	dev->vdev->device_caps = cap->device_caps = cap->capabilities =
+ 		capabilities;
++#else
++	/* struct video_device has no device_caps before 3.19 */
++	cap->device_caps = cap->capabilities = capabilities;
++#endif
+ 
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 3, 0)
+ 	cap->capabilities |= V4L2_CAP_DEVICE_CAPS;
