@@ -1,0 +1,11 @@
+camtest - rear camera (S5K3L2) bring-up on the J4 via the FIMC-IS2 OTF chain
+SS0 -> 3AA0 -> ISP0 -> MCSC0 (M0P out), NV21 1280x960 from the 2072x1552@30 sensor mode.
+
+Build ON THE PHONE (needs gcc), from a dir holding camtest.c + inc/ contents:
+    gcc -I. -O1 -o camtest camtest.c      (inc/*.h copied next to camtest.c)
+Run:  ./camtest 5 60        # stage 5, 60 frames; writes /tmp/frame.nv21 (last frame)
+View: ffmpeg -f rawvideo -pix_fmt nv21 -s 1280x960 -i frame.nv21 frame.png
+Stages 1-4 stop earlier (open+S_INPUT / +S_FMT / +REQBUFS / +STREAMON).
+
+Needs on the device: /system/vendor/firmware -> /vendor/firmware symlink, /vendor mounted
+(initramfs does it), udev's 60-persistent-v4l.rules masked, /dev/ion. See memory notes.

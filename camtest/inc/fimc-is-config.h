@@ -1,0 +1,1 @@
+#define CAPTURE_NODE_MAX 5
