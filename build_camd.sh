@@ -71,8 +71,11 @@ sudo install -o root -g root -m 755 "$OUT_DIR/camd" "$ROOTFS_DIR/usr/local/sbin/
 sudo install -o root -g root -m 644 "$OUT_DIR/v4l2loopback.ko" "$ROOTFS_DIR/usr/local/lib/camd/v4l2loopback.ko"
 
 sudo install -d -m 755 "$ROOTFS_DIR/etc/systemd/system/multi-user.target.wants"
-sudo install -o root -g root -m 644 "$SRC_DIR/camd.service" "$ROOTFS_DIR/etc/systemd/system/camd.service"
-sudo ln -sf /etc/systemd/system/camd.service "$ROOTFS_DIR/etc/systemd/system/multi-user.target.wants/camd.service"
+sudo rm -f "$ROOTFS_DIR/etc/systemd/system/camd.service" "$ROOTFS_DIR/etc/systemd/system/multi-user.target.wants/camd.service"
+for unit in camd-loopback camd-rear camd-front; do
+	sudo install -o root -g root -m 644 "$SRC_DIR/$unit.service" "$ROOTFS_DIR/etc/systemd/system/$unit.service"
+	sudo ln -sf "/etc/systemd/system/$unit.service" "$ROOTFS_DIR/etc/systemd/system/multi-user.target.wants/$unit.service"
+done
 
 # FIMC-IS2 looks its firmware up under the stock Android path.
 sudo install -d -m 755 "$ROOTFS_DIR/system/vendor"

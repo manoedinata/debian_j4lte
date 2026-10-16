@@ -1,0 +1,12 @@
+[Unit]
+Description=v4l2loopback devices for the J4 cameras (/dev/video20 rear, /dev/video21 front)
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# built out of tree for this kernel (see build_camd.sh); the leading '-' tolerates it
+# already being loaded
+ExecStart=-/sbin/insmod /usr/local/lib/camd/v4l2loopback.ko devices=2 video_nr=20,21 exclusive_caps=1,1 "card_label=\"J4 Rear Camera,J4 Front Camera\""
+
+[Install]
+WantedBy=multi-user.target

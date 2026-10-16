@@ -9,7 +9,7 @@
  * seconds without readers stops it again.
  *
  * Build on the phone:  gcc -I. -O2 -o camd camd.c
- * Run:                 camd [-d /dev/video20] [-r 0|90|180|270] [-s WxH] [-v]
+ * Run:                 camd [-c rear|front] [-d /dev/video20] [-r 0|90|180|270] [-s WxH] [-v]
  *                      -s is the PUBLISHED size (after rotation), default 480x640
  */
 #define _GNU_SOURCE
@@ -25,6 +25,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <sys/ioctl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
@@ -37,9 +38,9 @@
 #define CID_BASE		(V4L2_CTRL_CLASS_CAMERA | 0x1000)
 #define CID_IS_S_STREAM		(CID_BASE + 14)
 #define CID_IS_END_OF_STREAM	(CID_BASE + 58)
+#define CID_IS_FORCE_DONE	(CID_BASE + 50)
 
 /* video ids (device node = /dev/video(100 + id)) */
-#define VID_SS0		1
 #define VID_30S		10
 #define VID_30P		12
 #define VID_I0S		30
@@ -47,29 +48,48 @@
 #define VID_M0S		60
 #define VID_M0P		70
 
-#define SENSOR_3L2	8
+/*
+ * Per-camera profile. The OTF chain (3AA0 -> ISP0 -> MCSC0) is shared: the
+ * ischain finds its sensor by matching the module id among the opened sensor
+ * nodes, so the front camera just uses ss1 and its own sensor id.
+ */
+struct camera {
+	const char *name;
+	int sensor_id;		/* module id passed to S_INPUT */
+	int ss_vid;		/* sensor video node id (SS0 = 1, SS1 = 2) */
+	const char *ss_sysname;	/* its name in sysfs */
+	int sen_w, sen_h;	/* sensor mode, 4:3 */
+	int rotation;		/* default clockwise rotation to make it upright */
+};
+
+static const struct camera cameras[] = {
+	/* S5K3L2, rear: mode 3, 2072x1552 @30, 4 lanes, mounted sideways */
+	{ "rear",  8, 1, "exynos-fimc-is-ss0", 2072, 1552, 90 },
+	/* S5K5E3, front: mode 1, 1280x960 @30, 2 lanes */
+	{ "front", 17, 2, "exynos-fimc-is-ss1", 1280, 960, 270 },
+};
+static const struct camera *cam = &cameras[0];
 
 /*
- * 3L2 mode 3: 2072x1552 @30 fps. The MCSC hardware scaler shrinks it to
+ * The MCSC hardware scaler shrinks the sensor picture (cam->sen_w x sen_h) to
  * out_w x out_h (4:3, set by -s) at no CPU cost; everything downstream
  * (rotation, the readers' colour conversion) scales with the pixel count.
  */
-#define SEN_W		2072
-#define SEN_H		1552
 #define OUT_FPS		30
 
 #define SPARE_SIZE	(32 * 1024)
 #define MAXBUF		4
 #define NBUF		4
 
-#define IDLE_STOP_SEC	5
+#define IDLE_STOP_SEC	2
 #define SCAN_MS_IDLE	500
-#define SCAN_MS_RUN	2000
+#define SCAN_MS_RUN	500
 
+static int sen_w, sen_h;	/* active camera's sensor mode (from -c) */
 static int verbose;
 static int out_w = 640, out_h = 480;	/* MCSC output (sensor orientation), from -s */
 static int out_size;			/* NV12 frame size = out_w * out_h * 3 / 2 */
-static int rotation = 90;	/* degrees clockwise applied before publishing: 0, 90, 180, 270 */
+static int rotation = -1;	/* degrees clockwise applied before publishing: 0, 90, 180, 270 */
 static int pub_w, pub_h;	/* published frame size (swapped for 90/270) */
 static unsigned char *rot_buf;
 static volatile sig_atomic_t quit;
@@ -99,7 +119,7 @@ struct node {
 	struct buf buf[MAXBUF];
 };
 
-static struct node n_ss0 = { "ss0",  "exynos-fimc-is-ss0", VID_SS0, -1, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE };
+static struct node n_ss0 = { "ss0",  "exynos-fimc-is-ss0", 1, -1, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE };
 static struct node n_30s = { "3aa",  "exynos-fimc-is-30s", VID_30S, -1, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE };
 static struct node n_30p = { "3aap", "exynos-fimc-is-30p", VID_30P, -1, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE };
 static struct node n_i0s = { "isp",  "exynos-fimc-is-i0s", VID_I0S, -1, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE };
@@ -460,26 +480,26 @@ static void fill_shot(struct node *leader, int index, uint32_t fcount)
 	s->shot.ctl.sensor.exposureTime = 16666666;
 	s->shot.ctl.sensor.frameDuration = 1000000000 / OUT_FPS;
 	s->shot.ctl.sensor.sensitivity = 100;
-	fill_crop(s->shot.ctl.scaler.cropRegion, SEN_W, SEN_H);
+	fill_crop(s->shot.ctl.scaler.cropRegion, sen_w, sen_h);
 
 	s->node_group.leader.vid = leader->vid;
 	s->node_group.leader.request = 1;
-	fill_crop(s->node_group.leader.input.cropRegion, SEN_W, SEN_H);
-	fill_crop(s->node_group.leader.output.cropRegion, SEN_W, SEN_H);
+	fill_crop(s->node_group.leader.input.cropRegion, sen_w, sen_h);
+	fill_crop(s->node_group.leader.output.cropRegion, sen_w, sen_h);
 
 	s->node_group.capture[0].vid = VID_30P;
 	s->node_group.capture[0].request = 1;
-	fill_crop(s->node_group.capture[0].input.cropRegion, SEN_W, SEN_H);
-	fill_crop(s->node_group.capture[0].output.cropRegion, SEN_W, SEN_H);
+	fill_crop(s->node_group.capture[0].input.cropRegion, sen_w, sen_h);
+	fill_crop(s->node_group.capture[0].output.cropRegion, sen_w, sen_h);
 
 	s->node_group.capture[1].vid = VID_I0P;
 	s->node_group.capture[1].request = 1;
-	fill_crop(s->node_group.capture[1].input.cropRegion, SEN_W, SEN_H);
-	fill_crop(s->node_group.capture[1].output.cropRegion, SEN_W, SEN_H);
+	fill_crop(s->node_group.capture[1].input.cropRegion, sen_w, sen_h);
+	fill_crop(s->node_group.capture[1].output.cropRegion, sen_w, sen_h);
 
 	s->node_group.capture[2].vid = VID_M0P;
 	s->node_group.capture[2].request = 1;
-	fill_crop(s->node_group.capture[2].input.cropRegion, SEN_W, SEN_H);
+	fill_crop(s->node_group.capture[2].input.cropRegion, sen_w, sen_h);
 	fill_crop(s->node_group.capture[2].output.cropRegion, out_w, out_h);
 }
 
@@ -487,13 +507,38 @@ static void fill_shot(struct node *leader, int index, uint32_t fcount)
 /* pipeline bring-up / tear-down                                       */
 /* ------------------------------------------------------------------ */
 
+static double now(void);
+
+static void streamoff(struct node *n)
+{
+	int type = n->type;
+
+	if (ioctl(n->fd, VIDIOC_STREAMOFF, &type))
+		LOG("STREAMOFF %s: %s", n->name, strerror(errno));
+}
+
 static void cam_stop(void)
 {
 	size_t i;
+	double t0 = now();
 
 	if (stream_on) {
+		/*
+		 * Tell each group to cancel its pending shots when it stops. Without
+		 * this the driver waits out its 3 s retry loops per stage for frames
+		 * that can never complete once the sensor is off (~10 s to close).
+		 */
+		s_ctrl(&n_30s, CID_IS_FORCE_DONE, 1, "FORCE_DONE");
+		s_ctrl(&n_i0s, CID_IS_FORCE_DONE, 1, "FORCE_DONE");
+		s_ctrl(&n_m0s, CID_IS_FORCE_DONE, 1, "FORCE_DONE");
 		s_ctrl(&n_ss0, CID_IS_S_STREAM, 0, "S_STREAM");
 		stream_on = 0;
+		/*
+		 * Stop the head group (3AA) first: stopping it cancels the queued
+		 * shots for the whole OTF chain. Stopping ISP/MCSC first makes each
+		 * wait ~4.5 s for 3AA shots that only the 3AA stop can cancel.
+		 */
+		streamoff(&n_30s);
 	}
 	/*
 	 * Closing everything is the tear-down path the driver has handled
@@ -501,7 +546,7 @@ static void cam_stop(void)
 	 */
 	for (i = NNODES; i-- > 0;)
 		node_close(all_nodes[i]);
-	LOG("camera stopped");
+	LOG("camera stopped (%.1f s)", now() - t0);
 }
 
 static int cam_start(void)
@@ -514,22 +559,22 @@ static int cam_start(void)
 		if (node_open(all_nodes[i]))
 			goto fail;
 
-	if (s_input(&n_ss0, SENSOR_3L2))
+	if (s_input(&n_ss0, cam->sensor_id))
 		goto fail;
 	/* all ischain nodes are open: let the driver bring the chain up */
 	if (s_ctrl(&n_30s, CID_IS_END_OF_STREAM, 0, "END_OF_STREAM"))
 		goto fail;
-	if (s_input(&n_30s, mk_input(SENSOR_3L2, VID_SS0, 1, 1)) ||
-	    s_input(&n_i0s, mk_input(SENSOR_3L2, VID_30P, 1, 0)) ||
-	    s_input(&n_m0s, mk_input(SENSOR_3L2, VID_I0P, 1, 0)))
+	if (s_input(&n_30s, mk_input(cam->sensor_id, n_ss0.vid, 1, 1)) ||
+	    s_input(&n_i0s, mk_input(cam->sensor_id, VID_30P, 1, 0)) ||
+	    s_input(&n_m0s, mk_input(cam->sensor_id, VID_I0P, 1, 0)))
 		goto fail;
 
-	if (s_fmt(&n_ss0, V4L2_PIX_FMT_SBGGR10, SEN_W, SEN_H) ||
-	    s_fmt(&n_30s, V4L2_PIX_FMT_SBGGR10, SEN_W, SEN_H) ||
-	    s_fmt(&n_30p, V4L2_PIX_FMT_SBGGR10, SEN_W, SEN_H) ||
-	    s_fmt(&n_i0s, V4L2_PIX_FMT_SBGGR10, SEN_W, SEN_H) ||
-	    s_fmt(&n_i0p, V4L2_PIX_FMT_NV21, SEN_W, SEN_H) ||
-	    s_fmt(&n_m0s, V4L2_PIX_FMT_NV21, SEN_W, SEN_H) ||
+	if (s_fmt(&n_ss0, V4L2_PIX_FMT_SBGGR10, sen_w, sen_h) ||
+	    s_fmt(&n_30s, V4L2_PIX_FMT_SBGGR10, sen_w, sen_h) ||
+	    s_fmt(&n_30p, V4L2_PIX_FMT_SBGGR10, sen_w, sen_h) ||
+	    s_fmt(&n_i0s, V4L2_PIX_FMT_SBGGR10, sen_w, sen_h) ||
+	    s_fmt(&n_i0p, V4L2_PIX_FMT_NV21, sen_w, sen_h) ||
+	    s_fmt(&n_m0s, V4L2_PIX_FMT_NV21, sen_w, sen_h) ||
 	    s_fmt(&n_m0p, V4L2_PIX_FMT_NV12, out_w, out_h))
 		goto fail;
 
@@ -819,12 +864,12 @@ static int run_stream(int loop_fd, const char *path)
 int main(int argc, char **argv)
 {
 	const char *path = "/dev/video20";
-	int loop_fd, opt;
+	int loop_fd, opt, lock_fd = -1;
 	struct sigaction sa;
 
 	int want_w = 480, want_h = 640;
 
-	while ((opt = getopt(argc, argv, "d:r:s:v")) != -1) {
+	while ((opt = getopt(argc, argv, "c:d:r:s:v")) != -1) {
 		switch (opt) {
 		case 'd':
 			path = optarg;
@@ -836,6 +881,19 @@ int main(int argc, char **argv)
 				return 2;
 			}
 			break;
+		case 'c': {
+			size_t i;
+
+			cam = NULL;
+			for (i = 0; i < sizeof(cameras) / sizeof(cameras[0]); i++)
+				if (!strcmp(optarg, cameras[i].name))
+					cam = &cameras[i];
+			if (!cam) {
+				fprintf(stderr, "-c expects rear or front\n");
+				return 2;
+			}
+			break;
+		}
 		case 's':
 			if (sscanf(optarg, "%dx%d", &want_w, &want_h) != 2 ||
 			    want_w < 64 || want_h < 64 || want_w > 1920 || want_h > 1920) {
@@ -847,7 +905,7 @@ int main(int argc, char **argv)
 			verbose = 1;
 			break;
 		default:
-			fprintf(stderr, "usage: %s [-d /dev/videoN] [-r 0|90|180|270] [-s WxH] [-v]\n", argv[0]);
+			fprintf(stderr, "usage: %s [-c rear|front] [-d /dev/videoN] [-r 0|90|180|270] [-s WxH] [-v]\n", argv[0]);
 			return 2;
 		}
 	}
@@ -859,6 +917,14 @@ int main(int argc, char **argv)
 	sa.sa_handler = on_signal;
 	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGTERM, &sa, NULL);
+
+	/* apply the camera profile: its sensor node, mode and default rotation */
+	sen_w = cam->sen_w;
+	sen_h = cam->sen_h;
+	n_ss0.vid = cam->ss_vid;
+	n_ss0.sysname = cam->ss_sysname;
+	if (rotation < 0)
+		rotation = cam->rotation;
 
 	/* the scaler works in sensor orientation: swap for 90/270 */
 	pub_w = want_w;
@@ -886,7 +952,7 @@ int main(int argc, char **argv)
 	loop_fd = loop_open(path);
 	if (loop_fd < 0)
 		return 1;
-	LOG("publishing %dx%d NV12 (rotated %d) on %s; waiting for a reader", pub_w, pub_h, rotation, path);
+	LOG("%s camera: publishing %dx%d NV12 (rotated %d) on %s; waiting for a reader", cam->name, pub_w, pub_h, rotation, path);
 
 	while (!quit) {
 		if (!has_reader(path)) {
@@ -896,7 +962,23 @@ int main(int argc, char **argv)
 			continue;
 		}
 		LOG("reader present");
+		/*
+		 * Both cameras share one 3AA/ISP/MCSC chain, and a failed bring-up
+		 * can leave the driver wedged, so only one camd at a time may start
+		 * it. Wait for the other camera's reader to go away.
+		 */
+		if (lock_fd < 0)
+			lock_fd = open("/run/camd-pipeline.lock", O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+		if (lock_fd >= 0 && flock(lock_fd, LOCK_EX | LOCK_NB)) {
+			struct timespec ts = { 0, SCAN_MS_IDLE * 1000000L };
+
+			DBG("camera pipeline busy (other camera streaming)");
+			nanosleep(&ts, NULL);
+			continue;
+		}
 		if (cam_start()) {
+			if (lock_fd >= 0)
+				flock(lock_fd, LOCK_UN);
 			/* do not hammer the driver if bring-up keeps failing */
 			sleep(5);
 			continue;
@@ -904,6 +986,8 @@ int main(int argc, char **argv)
 		if (run_stream(loop_fd, path) < 0)
 			sleep(2);
 		cam_stop();
+		if (lock_fd >= 0)
+			flock(lock_fd, LOCK_UN);
 	}
 	close(loop_fd);
 	return 0;
