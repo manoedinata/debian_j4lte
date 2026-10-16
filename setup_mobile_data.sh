@@ -76,11 +76,15 @@ sudo install -d -m 755 "$ROOTFS_DIR/etc/systemd/system"
 sudo tee "$ROOTFS_DIR/etc/systemd/system/samsungipcd.service" >/dev/null <<'EOF'
 [Unit]
 Description=Samsung IPC modem AT command proxy (ss310ap/herolte profile)
+# the modem boot reads the NV data from /efs; without this the first start races the mount and fails
+RequiresMountsFor=/efs
 # ModemManager probes the ports once, when it sees them; samsungipcd has to be
 # answering by then or it gives up on them until the next rescan
 Before=ModemManager.service
 
 [Service]
+# SAMSUNGIPCD_APN: the APN to attach to LTE with as soon as the modem is ready (written below)
+EnvironmentFile=-/etc/default/samsungipcd
 # stdbuf: stdout is a pipe under systemd, so it would be block buffered
 # SyslogLevel: journald.conf here only stores notice and above, the
 # daemon's printf output would be dropped otherwise
@@ -92,6 +96,8 @@ RestartSec=2
 [Install]
 WantedBy=multi-user.target
 EOF
+sudo install -d -m 755 "$ROOTFS_DIR/etc/default"
+echo "SAMSUNGIPCD_APN=$APN" | sudo tee "$ROOTFS_DIR/etc/default/samsungipcd" >/dev/null
 sudo install -d -m 755 "$ROOTFS_DIR/etc/systemd/system/multi-user.target.wants"
 sudo ln -sf /etc/systemd/system/samsungipcd.service "$ROOTFS_DIR/etc/systemd/system/multi-user.target.wants/samsungipcd.service"
 
