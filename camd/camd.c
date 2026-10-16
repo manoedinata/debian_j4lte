@@ -9,7 +9,7 @@
  * seconds without readers stops it again.
  *
  * Build on the phone:  gcc -I. -O2 -o camd camd.c
- * Run:                 camd [-d /dev/video20] [-v]
+ * Run:                 camd [-d /dev/video20] [-r 0|90|180|270] [-v]
  */
 #define _GNU_SOURCE
 #include <stdint.h>
@@ -54,7 +54,7 @@
 #define OUT_W		1280
 #define OUT_H		960
 #define OUT_FPS		30
-#define OUT_SIZE	(OUT_W * OUT_H * 3 / 2)
+#define OUT_SIZE	(OUT_W * OUT_H * 3 / 2)	/* NV12 frame size, rotation-independent */
 
 #define SPARE_SIZE	(32 * 1024)
 #define MAXBUF		4
@@ -65,6 +65,9 @@
 #define SCAN_MS_RUN	2000
 
 static int verbose;
+static int rotation = 90;	/* degrees clockwise applied before publishing: 0, 90, 180, 270 */
+static int pub_w = OUT_W, pub_h = OUT_H;	/* published frame size (swapped for 90/270) */
+static unsigned char *rot_buf;
 static volatile sig_atomic_t quit;
 
 /* under systemd, "<5>" makes the line notice-level so journald keeps it */
@@ -112,11 +115,17 @@ static int stream_on;		/* sensor front-start issued */
 /* ION buffers                                                         */
 /* ------------------------------------------------------------------ */
 
-/* uncached system-heap ION buffer -> dma-buf fd */
-static int ion_alloc_fd(size_t len)
+/*
+ * system-heap ION buffer -> dma-buf fd. Buffers the CPU only reads (the
+ * MCSC output image) are cached, since uncached reads are ~50x slower; the
+ * caller syncs them before each read (ion_sync_fd). Shot-metadata buffers
+ * stay uncached so the kernel always sees what userspace wrote.
+ */
+static int ion_alloc_fd(size_t len, int cached)
 {
 	struct ion_allocation_data a = {
-		.len = len, .align = 4096, .heap_id_mask = 1 /* system */, .flags = 0,
+		.len = len, .align = 4096, .heap_id_mask = 1 /* system */,
+		.flags = cached ? ION_FLAG_CACHED : 0,
 	};
 	struct ion_fd_data d;
 	struct ion_handle_data h;
@@ -143,6 +152,15 @@ static int ion_alloc_fd(size_t len)
 	h.handle = a.handle;
 	ioctl(ion_fd, ION_IOC_FREE, &h);	/* the dma-buf fd keeps it alive */
 	return d.fd;
+}
+
+/* make DMA-written data in a cached buffer visible to the CPU */
+static void ion_sync_fd(int fd)
+{
+	struct ion_fd_data d = { .handle = 0, .fd = fd };
+
+	if (ion_fd >= 0 && ioctl(ion_fd, ION_IOC_SYNC, &d))
+		DBG("ION_IOC_SYNC: %s", strerror(errno));
 }
 
 static void node_free_bufs(struct node *n)
@@ -316,7 +334,8 @@ static int reqbufs_dmabuf(struct node *n, int count, int map_img)
 		n->nplanes = b.length;
 		for (p = 0; p < (int)b.length; p++) {
 			n->buf[i].len[p] = planes[p].length;
-			n->buf[i].fd[p] = ion_alloc_fd(planes[p].length);
+			/* only the image plane of a CPU-read node is cached */
+			n->buf[i].fd[p] = ion_alloc_fd(planes[p].length, map_img && p == 0);
 			if (n->buf[i].fd[p] < 0)
 				return -1;
 		}
@@ -555,6 +574,72 @@ fail:
 }
 
 /* ------------------------------------------------------------------ */
+/* rotation (the sensor sits sideways in the phone)                    */
+/* ------------------------------------------------------------------ */
+
+#define TILE 32
+
+/*
+ * Tiled rotation of a w x h plane of T-sized elements (T = 1 byte for Y,
+ * 2 bytes for the interleaved UV pairs). One function per angle so the inner
+ * loop is a plain strided copy.
+ */
+#define DEFINE_ROT(name, T, DI)							\
+static void name(const T *src, T *dst, int w, int h)				\
+{										\
+	int x0, y0, x, y;							\
+										\
+	for (y0 = 0; y0 < h; y0 += TILE) {					\
+		int ye = y0 + TILE < h ? y0 + TILE : h;				\
+										\
+		for (x0 = 0; x0 < w; x0 += TILE) {				\
+			int xe = x0 + TILE < w ? x0 + TILE : w;			\
+										\
+			for (y = y0; y < ye; y++) {				\
+				const T *sp = src + (size_t)y * w;		\
+				for (x = x0; x < xe; x++)			\
+					dst[DI] = sp[x];			\
+			}							\
+		}								\
+	}									\
+}
+
+/* clockwise 90: (x,y) -> (h-1-y, x), destination is h wide */
+DEFINE_ROT(rot90_8,   unsigned char,  (size_t)x * h + (h - 1 - y))
+DEFINE_ROT(rot90_16,  unsigned short, (size_t)x * h + (h - 1 - y))
+/* clockwise 270: (x,y) -> (y, w-1-x) */
+DEFINE_ROT(rot270_8,  unsigned char,  (size_t)(w - 1 - x) * h + y)
+DEFINE_ROT(rot270_16, unsigned short, (size_t)(w - 1 - x) * h + y)
+/* 180: (x,y) -> (w-1-x, h-1-y), destination is w wide */
+DEFINE_ROT(rot180_8,  unsigned char,  (size_t)(h - 1 - y) * w + (w - 1 - x))
+DEFINE_ROT(rot180_16, unsigned short, (size_t)(h - 1 - y) * w + (w - 1 - x))
+
+/* rotate an NV12 frame (Y plane + interleaved UV plane) clockwise by deg */
+static void rotate_nv12(const unsigned char *src, unsigned char *dst, int deg)
+{
+	const unsigned char *suv = src + OUT_W * OUT_H;
+	unsigned char *duv = dst + OUT_W * OUT_H;
+
+	switch (deg) {
+	case 90:
+		rot90_8(src, dst, OUT_W, OUT_H);
+		rot90_16((const unsigned short *)suv, (unsigned short *)duv,
+			 OUT_W / 2, OUT_H / 2);
+		break;
+	case 270:
+		rot270_8(src, dst, OUT_W, OUT_H);
+		rot270_16((const unsigned short *)suv, (unsigned short *)duv,
+			  OUT_W / 2, OUT_H / 2);
+		break;
+	default:
+		rot180_8(src, dst, OUT_W, OUT_H);
+		rot180_16((const unsigned short *)suv, (unsigned short *)duv,
+			  OUT_W / 2, OUT_H / 2);
+		break;
+	}
+}
+
+/* ------------------------------------------------------------------ */
 /* loopback output + reader detection                                  */
 /* ------------------------------------------------------------------ */
 
@@ -570,11 +655,11 @@ static int loop_open(const char *path)
 	}
 	memset(&f, 0, sizeof(f));
 	f.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
-	f.fmt.pix.width = OUT_W;
-	f.fmt.pix.height = OUT_H;
+	f.fmt.pix.width = pub_w;
+	f.fmt.pix.height = pub_h;
 	f.fmt.pix.pixelformat = V4L2_PIX_FMT_NV12;
 	f.fmt.pix.field = V4L2_FIELD_NONE;
-	f.fmt.pix.bytesperline = OUT_W;
+	f.fmt.pix.bytesperline = pub_w;
 	f.fmt.pix.sizeimage = OUT_SIZE;
 	f.fmt.pix.colorspace = V4L2_COLORSPACE_SRGB;
 	if (ioctl(fd, VIDIOC_S_FMT, &f)) {
@@ -597,8 +682,8 @@ static int loop_open(const char *path)
 		unsigned char *blank = malloc(OUT_SIZE);
 
 		if (blank) {
-			memset(blank, 16, OUT_W * OUT_H);
-			memset(blank + OUT_W * OUT_H, 128, OUT_W * OUT_H / 2);
+			memset(blank, 16, pub_w * pub_h);
+			memset(blank + pub_w * pub_h, 128, pub_w * pub_h / 2);
 			if (write(fd, blank, OUT_SIZE) != OUT_SIZE)
 				LOG("placeholder write: %s", strerror(errno));
 			free(blank);
@@ -695,8 +780,14 @@ static int run_stream(int loop_fd, const char *path)
 		idx = dqbuf(&n_m0p);
 		if (idx < 0)
 			return -1;
-		if (write(loop_fd, n_m0p.buf[idx].img, OUT_SIZE) != OUT_SIZE)
+		ion_sync_fd(n_m0p.buf[idx].fd[0]);
+		if (rotation) {
+			rotate_nv12(n_m0p.buf[idx].img, rot_buf, rotation);
+			if (write(loop_fd, rot_buf, OUT_SIZE) != OUT_SIZE)
+				DBG("loopback write: %s", strerror(errno));
+		} else if (write(loop_fd, n_m0p.buf[idx].img, OUT_SIZE) != OUT_SIZE) {
 			DBG("loopback write: %s", strerror(errno));
+		}
 		frames++;
 		if (qbuf(&n_m0p, idx))
 			return -1;
@@ -727,16 +818,23 @@ int main(int argc, char **argv)
 	int loop_fd, opt;
 	struct sigaction sa;
 
-	while ((opt = getopt(argc, argv, "d:v")) != -1) {
+	while ((opt = getopt(argc, argv, "d:r:v")) != -1) {
 		switch (opt) {
 		case 'd':
 			path = optarg;
+			break;
+		case 'r':
+			rotation = atoi(optarg);
+			if (rotation != 0 && rotation != 90 && rotation != 180 && rotation != 270) {
+				fprintf(stderr, "rotation must be 0, 90, 180 or 270\n");
+				return 2;
+			}
 			break;
 		case 'v':
 			verbose = 1;
 			break;
 		default:
-			fprintf(stderr, "usage: %s [-d /dev/videoN] [-v]\n", argv[0]);
+			fprintf(stderr, "usage: %s [-d /dev/videoN] [-r 0|90|180|270] [-v]\n", argv[0]);
 			return 2;
 		}
 	}
@@ -749,10 +847,20 @@ int main(int argc, char **argv)
 	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGTERM, &sa, NULL);
 
+	if (rotation == 90 || rotation == 270) {
+		pub_w = OUT_H;
+		pub_h = OUT_W;
+	}
+	rot_buf = malloc(OUT_SIZE);
+	if (!rot_buf) {
+		LOG("out of memory");
+		return 1;
+	}
+
 	loop_fd = loop_open(path);
 	if (loop_fd < 0)
 		return 1;
-	LOG("publishing %dx%d NV12 on %s; waiting for a reader", OUT_W, OUT_H, path);
+	LOG("publishing %dx%d NV12 (rotated %d) on %s; waiting for a reader", pub_w, pub_h, rotation, path);
 
 	while (!quit) {
 		if (!has_reader(path)) {
